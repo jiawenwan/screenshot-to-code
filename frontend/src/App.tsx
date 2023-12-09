@@ -2,7 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import ImageUpload from "./components/ImageUpload";
 import CodePreview from "./components/CodePreview";
 import Preview from "./components/Preview";
-import { CodeGenerationParams, generateCode } from "./generateCode";
+import {
+  CodeGenerationParams,
+  InstructionGenerationParams,
+  generateCode,
+  generateInstruction,
+} from "./generateCode";
 import Spinner from "./components/Spinner";
 import classNames from "classnames";
 import {
@@ -27,6 +32,7 @@ import { UrlInputSection } from "./components/UrlInputSection";
 import TermsOfServiceDialog from "./components/TermsOfServiceDialog";
 import html2canvas from "html2canvas";
 import { USER_CLOSE_WEB_SOCKET_CODE } from "./constants";
+import { calculateMistakesNum, handleInstructions } from "./lib/utils";
 import CodeTab from "./components/CodeTab";
 import OutputSettingsSection from "./components/OutputSettingsSection";
 import { History } from "./components/history/history_types";
@@ -67,7 +73,7 @@ function App() {
 
   const [shouldIncludeResultImage, setShouldIncludeResultImage] =
     useState<boolean>(false);
-
+  const [mistakesNum, setMistakesNum] = useState<number>(0);
   const wsRef = useRef<WebSocket>(null);
 
   // When the user already has the settings in local storage, newly added keys
@@ -131,6 +137,7 @@ function App() {
     parentVersion: number | null
   ) {
     setExecutionConsole([]);
+    setMistakesNum(0);
     setAppState(AppState.CODING);
 
     // Merge settings with params
@@ -181,6 +188,29 @@ function App() {
       (line) => setExecutionConsole((prev) => [...prev, line]),
       () => {
         setAppState(AppState.CODE_READY);
+      }
+    );
+  }
+
+  function doGenerateInstruction(params: InstructionGenerationParams) {
+    setAppState(AppState.INSTRUCTION_GENERATING);
+    setUpdateInstruction("");
+    setMistakesNum(0);
+    // Merge settings with params
+    const updatedParams = { ...params, ...settings };
+
+    generateInstruction(
+      wsRef,
+      updatedParams,
+      (token) => setUpdateInstruction((prev) => prev + token),
+      (code) => setUpdateInstruction(code),
+      (line) => setExecutionConsole((prev) => [...prev, line]),
+      () => {
+        setAppState(AppState.CODE_READY);
+        setUpdateInstruction((instruction) => {
+          setMistakesNum(calculateMistakesNum(instruction));
+          return handleInstructions(instruction);
+        });
       }
     );
   }
@@ -256,6 +286,15 @@ function App() {
     }));
   };
 
+  const instructionGenerate = async () => {
+    const resultImage = await takeScreenshot();
+    const originalImage = referenceImages[0];
+    doGenerateInstruction({
+      image: originalImage,
+      resultImage: resultImage,
+    });
+  };
+
   return (
     <div className="mt-2 dark:bg-black dark:text-white">
       {IS_RUNNING_ON_CLOUD && <PicoBadge settings={settings} />}
@@ -298,7 +337,8 @@ function App() {
           )}
 
           {(appState === AppState.CODING ||
-            appState === AppState.CODE_READY) && (
+            appState === AppState.CODE_READY ||
+            appState === AppState.INSTRUCTION_GENERATING) && (
             <>
               {/* Show code preview only when coding */}
               {appState === AppState.CODING && (
@@ -319,13 +359,15 @@ function App() {
                 </div>
               )}
 
-              {appState === AppState.CODE_READY && (
+              {(appState === AppState.CODE_READY ||
+                appState === AppState.INSTRUCTION_GENERATING) && (
                 <div>
                   <div className="grid w-full gap-2">
                     <Textarea
                       placeholder="Tell the AI what to change..."
                       onChange={(e) => setUpdateInstruction(e.target.value)}
                       value={updateInstruction}
+                      disabled={appState === AppState.INSTRUCTION_GENERATING}
                     />
                     <div className="flex justify-between items-center gap-x-2">
                       <div className="font-500 text-xs text-slate-700 dark:text-white">
@@ -334,14 +376,26 @@ function App() {
                       <Switch
                         checked={shouldIncludeResultImage}
                         onCheckedChange={setShouldIncludeResultImage}
-                        className="dark:bg-gray-700"
+                        disabled={appState === AppState.INSTRUCTION_GENERATING}
                       />
                     </div>
+
                     <Button
                       onClick={doUpdate}
                       className="dark:text-white dark:bg-gray-700"
+                      disabled={appState === AppState.INSTRUCTION_GENERATING}
                     >
                       Update
+                    </Button>
+
+                    <Button
+                      onClick={instructionGenerate}
+                      className="flex items-center gap-x-2"
+                      disabled={appState === AppState.INSTRUCTION_GENERATING}
+                    >
+                      {appState === AppState.INSTRUCTION_GENERATING
+                        ? "Generating Instruction..."
+                        : "Generate Instruction"}
                     </Button>
                   </div>
                   <div className="flex items-center gap-x-2 mt-2">
@@ -354,6 +408,7 @@ function App() {
                     <Button
                       onClick={reset}
                       className="flex items-center gap-x-2 dark:text-white dark:bg-gray-700"
+                      disabled={appState === AppState.INSTRUCTION_GENERATING}
                     >
                       <FaUndo />
                       Reset
@@ -364,7 +419,7 @@ function App() {
 
               {/* Reference image display */}
               <div className="flex gap-x-2 mt-2">
-                <div className="flex flex-col">
+                <div className="flex flex-col items-center">
                   <div
                     className={classNames({
                       "scanning relative": appState === AppState.CODING,
@@ -378,6 +433,9 @@ function App() {
                   </div>
                   <div className="text-gray-400 uppercase text-sm text-center mt-1">
                     Original Screenshot
+                  </div>
+                  <div className="flex flex-col mt-4 text-sm">
+                    Total Mistakes Found: {mistakesNum}
                   </div>
                 </div>
                 <div className="bg-gray-400 px-4 py-2 rounded text-sm hidden">
@@ -427,7 +485,9 @@ function App() {
           </div>
         )}
 
-        {(appState === AppState.CODING || appState === AppState.CODE_READY) && (
+        {(appState === AppState.CODING ||
+          appState === AppState.CODE_READY ||
+          appState === AppState.INSTRUCTION_GENERATING) && (
           <div className="ml-4">
             <Tabs defaultValue="desktop">
               <div className="flex justify-end mr-8 mb-4">
